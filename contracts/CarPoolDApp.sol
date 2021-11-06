@@ -5,13 +5,39 @@ contract SupplyChain {
 
   address public owner;
 
-  uint public parentCount;
+  int public parentId;
 
-  uint public tripBlockSize;
+  int public parentCount;
 
-  mapping(address => uint) parentTrips;
+  int public tripBlockSize;
+
+  mapping(address => ParentInfo) parentTrips;
 
   mapping(address => bool) blacklistedParents;
+
+  int constant MAXPARENTS = 5;
+
+  int constant MAX_ADVANCETRIPS = 3;
+
+ // bool carPoolBlockStarted;
+
+ // bool prevBlockCompleted = false;
+
+
+  enum State {Start, InProgress, End, Init}
+
+  State globalCarpoolState;
+
+  struct ParentInfo{
+    string name;
+    int totalTripsToDo;
+    int tripsCompleted;
+    int advanceTripsCompleted;
+    int deleteAttempt;
+    State tripState;
+    address parentSwapFrom;
+   // address parentSwapTo;
+  }
   
   /* 
    * Events
@@ -19,16 +45,71 @@ contract SupplyChain {
 
   event LogParentTrip(address parent);
 
-  event LogAddParentToCarPool(address parent);
+  event LogAdvanceParentTrip(address parent);
+
+  event LogAddParentToCarPool(string name);
 
   event LogDeleteParentFromCarpool(address parent);
 
  event LogAddParentToBlacklist(address parent);
 
+ event LogParentTripInitlized(address parent);
+
+ event LogStartCarpoolBlock();
+ 
+ event LogEndCarpoolBlock();
+
+ event LogWarningBlacklist(address parent);
+
   
+  /* 
+   * Modifiers
+   */
+
+  // Create a modifer, `isOwner` that checks if the msg.sender is the owner of the contract
+
+  // <modifier: isOwner
+
+  modifier isOwner (address _address) { 
+     require (owner == _address); 
+    _;
+  }
+
+  modifier checkParentCanBeAdded(){
+    require (parentCount <= MAXPARENTS);
+    _;
+  }
+
+  modifier isParentBlackListed(address parent){
+    require (blacklistedParents[parent]);
+    _;
+  }
+
+   modifier requiredTripsNotComplete(){
+    require ( getTotalTrips (msg.sender) < parentTrips[msg.sender].totalTripsToDo);
+    _;
+  }
+
+ modifier currentScheduleNotStarted(){
+    require (tripBlockSize == 0);
+    _;
+  }
+
+   modifier requiredTripsCompleted(){
+    require (parentTrips[msg.sender].totalTripsToDo == parentTrips[msg.sender].tripsCompleted);
+    _;
+  }
+
+  modifier currentScheduleRunning(){
+
+    require(globalCarpoolState == State.Start);
+    _;
+  }
 
   constructor() public {
     owner = msg.sender;
+    parentId = 1;
+
     // 1. Set the owner to the transaction sender
     
   }
@@ -50,10 +131,23 @@ contract SupplyChain {
     //   -  emit the event
     //   -  show when they can be added next
     //   - return false
-  function addParentToCarpool(address parent) public returns (bool) {
+  function addParentToCarpool(string memory _name) checkParentCanBeAdded() isParentBlackListed(msg.sender) currentScheduleNotStarted() public returns (int message) {
     
-    
-    return true;
+    parentTrips[msg.sender]=ParentInfo({
+      name: _name,
+      totalTripsToDo: -1,
+      tripsCompleted: -1,
+      advanceTripsCompleted: 0,
+      deleteAttempt: 0,
+      tripState: State.Init,
+      parentSwapFrom: msg.sender,
+      parentSwapTo: address(0)
+    });
+  
+    parentId = parentId+1;
+    parentCount = parentCount+1;
+    emit LogAddParentToCarPool(_name);
+    return parentId;
   }
 
 
@@ -78,11 +172,36 @@ contract SupplyChain {
   //    - decrement parentCount
   //    - add to blacklist
   //    - return true
-  function removeParentFromCarpool(address parent, bool allowBlacklist) public returns (bool){
+  function removeParentFromCarpool (address parent, bool allowBlacklist)  public returns (bool){
+
+    if(parentTrips[msg.sender].totalTripsToDo != parentTrips[msg.sender].tripsCompleted){
+      if(parentTrips[msg.sender].deleteAttempt < 3){
+        parentTrips[msg.sender].deleteAttempt +=1;
+      emit LogWarningBlacklist(parent);
+      } else {
+        blacklistedParents[parent]=true;
+        deleteParentMapping(parent);
+      }
+    }else {
+      deleteParentMapping(parent);
+    }
 
 return true;
   }
 
+ function deleteParentMapping (address parent)  private returns (){
+
+      delete parentTrips[parent];
+      parentCount = parentCount -1;
+      emit LogDeleteParentFromCarpool();
+
+  }
+
+   function getTotalTrips (address parent)  private returns (int){
+
+      return parentTrips[msg.sender].tripsCompleted + parentTrips[msg.sender].advanceTripsCompleted;
+
+  }
 
 // 1. When a parent schdules a trip, we need to decrement his trip count
 //   - decrement parent trip count
@@ -99,8 +218,71 @@ return true;
 //    - if tripCount is already -3, they should not be allowed to schdule more trips 
 //       - emit event
 //       - return false
-  function scheduleTrip(address parent) public returns (bool){
+  function scheduleTrip(address parent) requiredTripsNotComplete() public returns (bool){
 
+        if(globalCarpoolState == State.Start && parentTrips[msg.sender].tripState != State.Start){
+          parentTrips[msg.sender].tripState = State.Start;
+          parentTrips[msg.sender].totalTripsToDo = tripBlockSize / parentCount;
+          parentTrips[msg.sender].tripsCompleted = 0;
+          parentTrips[msg.sender].advanceTripsCompleted = 0 + parentTrips[msg.sender].advanceTripsCompleted;
+          emit LogParentTripInitlized( parent);
+        }
+    
+        if(getTotalTrips(parentTrips[msg.sender]) < parentTrips[msg.sender].totalTripsToDo ){
+              parentTrips[msg.sender].tripsCompleted +=1;
+              emit LogParentTrip( parent);
+        }
+
+      
+      tripBlockSize = tripBlockSize-1;
+      if(getTotalTrips(parentTrips[msg.sender]) == parentTrips[msg.sender].totalTripsToDo){
+        parentTrips[msg.sender].tripState = State.End;
+      }
+      if(tripBlockSize == 0){
+  //      carPoolBlockStarted=false;
+  //      prevBlockCompleted = true;
+        globalCarpoolState = State.End;
+        emit LogEndCarpoolBlock();
+      }
+    
+    return true;
+  }
+
+  function scheduleTripAndSwap(address parent) currentScheduleRunning() requiredTripsCompleted() public returns (bool){
+
+        // if(parentTrips[msg.sender].tripState == State.Init){
+        //   parentTrips[msg.sender].tripState = State.Start;
+        //   parentTrips[msg.sender].totalTripsToDo = tripBlockSize / parentCount;
+        //   parentTrips[msg.sender].tripsCompleted = 0;
+        //   parentTrips[msg.sender].advanceTripsCompleted = 0;
+        //   emit LogParentTripInitlized( parent);
+        // }
+        // if(parentTrips[msg.sender].tripState == State.End && carPoolBlockStarted){
+        //   parentTrips[msg.sender].tripState = State.Start;
+        //   parentTrips[msg.sender].totalTripsToDo = tripBlockSize / parentCount;
+        //   if(parentTrips[msg.sender].advanceTripsCompleted !=0)
+        //   parentTrips[msg.sender].tripsCompleted = 0 + parentTrips[msg.sender].advanceTripsCompleted;
+        //   parentTrips[msg.sender].advanceTripsCompleted = 0;
+        //   emit LogParentTripInitlized( parent);
+        // }
+         if (parentTrips[msg.sender].advanceTripsCompleted < MAX_ADVANCETRIPS){
+              parentTrips[msg.sender].advanceTripsCompleted +=1;
+              parentTrips[parent].tripsCompleted -=1; 
+              emit LogAdvanceParentTrip( parent);
+        } else{
+              revert("Can do any more additional trips");
+            }
+
+      
+      tripBlockSize = tripBlockSize-1;
+      if(getTotalTrips() == parentTrips[msg.sender].totalTripsToDo ){
+        parentTrips[msg.sender].tripState = State.End;
+      }
+      if(tripBlockSize == 0){
+       globalCarpoolState = State.End;
+       emit LogEndCarpoolBlock();
+      }
+    
     return true;
   }
 
@@ -111,7 +293,18 @@ return true;
 //    - remove parent with blacklisted=true
 //    - emit event
 // 4. Emit event
- function startCarpoolBlock() public {
+ function startCarpoolBlock() isOwner(msg.sender) public {
 
+ // carPoolBlockStarted=true;
+  globalCarpoolState = State.Start;
+  int maxTripsWeek = 5;
+  for(int i=1;i<MAXPARENTS;i++){
+   if(maxTripsWeek % parentCount ==0){
+    tripBlockSize = maxTripsWeek;
+  } else {
+    maxTripsWeek = maxTripsWeek * (i+1);
+  }
+ }
+   emit LogStartCarpoolBlock();
   }
 }
